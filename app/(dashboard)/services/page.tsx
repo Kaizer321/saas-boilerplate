@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { createSupabaseBrowserClient } from '@/lib/supabase/client';
-import { Briefcase, Plus, X, Loader2, Pencil, Trash2, DollarSign, Clock } from 'lucide-react';
+import { Briefcase, Plus, X, Loader2, Pencil, Trash2, DollarSign, Clock, AlertCircle } from 'lucide-react';
 import type { Service } from '@/types';
 
 export default function ServicesPage() {
@@ -12,6 +12,8 @@ export default function ServicesPage() {
     const [editing, setEditing] = useState<Service | null>(null);
     const [saving, setSaving] = useState(false);
     const [deleting, setDeleting] = useState<string | null>(null);
+    const [orgId, setOrgId] = useState<string | null>(null);
+    const [error, setError] = useState<string | null>(null);
 
     // Form state
     const [name, setName] = useState('');
@@ -20,36 +22,94 @@ export default function ServicesPage() {
     const [price, setPrice] = useState('');
     const [currency, setCurrency] = useState('USD');
 
-    const [orgId, setOrgId] = useState<string | null>(null);
-
     const supabase = createSupabaseBrowserClient();
 
-    const fetchOrgId = async () => {
-        const { data: { user } } = await supabase.auth.getUser();
-        if (user) {
-            const { data } = await supabase
-                .from('users')
-                .select('org_id')
-                .eq('id', user.id)
-                .single();
-            if (data) setOrgId(data.org_id);
-        }
-    };
+    useEffect(() => {
+        const init = async () => {
+            try {
+                // 1. Get current user
+                const { data: { user } } = await supabase.auth.getUser();
+                if (!user) {
+                    setError('Not authenticated. Please log in.');
+                    setLoading(false);
+                    return;
+                }
 
-    const fetchServices = async () => {
+                // 2. Get or create user profile + org
+                let userOrgId: string | null = null;
+
+                const { data: profile } = await supabase
+                    .from('users')
+                    .select('org_id')
+                    .eq('id', user.id)
+                    .single();
+
+                if (profile) {
+                    userOrgId = profile.org_id;
+                } else {
+                    // Signup trigger may have failed — create org + profile
+                    console.log('No user profile found. Creating org and profile...');
+
+                    const orgName = user.user_metadata?.org_name || user.email?.split('@')[0] || 'My Org';
+                    const slug = orgName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+
+                    const { data: newOrg, error: orgErr } = await supabase
+                        .from('organizations')
+                        .insert({
+                            name: orgName,
+                            slug: slug + '-' + Date.now().toString(36),
+                            timezone: 'UTC',
+                            plan: 'free',
+                            plan_status: 'active',
+                        })
+                        .select('id')
+                        .single();
+
+                    if (orgErr || !newOrg) {
+                        setError(`Could not create organization: ${orgErr?.message}`);
+                        setLoading(false);
+                        return;
+                    }
+
+                    await supabase.from('users').insert({
+                        id: user.id,
+                        org_id: newOrg.id,
+                        full_name: user.user_metadata?.full_name || user.email?.split('@')[0] || 'User',
+                        role: 'owner',
+                    });
+
+                    userOrgId = newOrg.id;
+                }
+
+                setOrgId(userOrgId);
+
+                // 3. Fetch services for this org
+                const { data: servicesData } = await supabase
+                    .from('services')
+                    .select('*')
+                    .eq('org_id', userOrgId)
+                    .order('created_at', { ascending: false });
+
+                setServices(servicesData || []);
+            } catch (err) {
+                setError('Something went wrong loading services.');
+                console.error(err);
+            }
+            setLoading(false);
+        };
+        init();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    const refreshServices = async () => {
+        if (!orgId) return;
         const { data } = await supabase
             .from('services')
             .select('*')
+            .eq('org_id', orgId)
             .order('created_at', { ascending: false });
         setServices(data || []);
-        setLoading(false);
     };
-
-    useEffect(() => {
-        fetchOrgId();
-        fetchServices();
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []);
 
     const openCreate = () => {
         setEditing(null);
@@ -58,6 +118,7 @@ export default function ServicesPage() {
         setDuration('30');
         setPrice('');
         setCurrency('USD');
+        setError(null);
         setShowModal(true);
     };
 
@@ -68,12 +129,14 @@ export default function ServicesPage() {
         setDuration(String(s.duration));
         setPrice(s.price !== null ? String(s.price) : '');
         setCurrency(s.currency);
+        setError(null);
         setShowModal(true);
     };
 
     const handleSave = async (e: React.FormEvent) => {
         e.preventDefault();
         setSaving(true);
+        setError(null);
 
         const payload = {
             name,
@@ -85,14 +148,24 @@ export default function ServicesPage() {
         };
 
         if (editing) {
-            await supabase.from('services').update(payload).eq('id', editing.id);
+            const { error: err } = await supabase.from('services').update(payload).eq('id', editing.id);
+            if (err) {
+                setError(`Update failed: ${err.message}`);
+                setSaving(false);
+                return;
+            }
         } else {
-            await supabase.from('services').insert({ ...payload, org_id: orgId });
+            const { error: err } = await supabase.from('services').insert({ ...payload, org_id: orgId });
+            if (err) {
+                setError(`Create failed: ${err.message}`);
+                setSaving(false);
+                return;
+            }
         }
 
         setSaving(false);
         setShowModal(false);
-        fetchServices();
+        await refreshServices();
     };
 
     const handleDelete = async (id: string) => {
@@ -100,12 +173,12 @@ export default function ServicesPage() {
         setDeleting(id);
         await supabase.from('services').delete().eq('id', id);
         setDeleting(null);
-        fetchServices();
+        await refreshServices();
     };
 
     const toggleActive = async (s: Service) => {
         await supabase.from('services').update({ is_active: !s.is_active }).eq('id', s.id);
-        fetchServices();
+        await refreshServices();
     };
 
     return (
@@ -123,6 +196,17 @@ export default function ServicesPage() {
                     Add Service
                 </button>
             </div>
+
+            {/* Error banner */}
+            {error && (
+                <div className="bg-red-50 text-red-700 text-sm p-4 rounded-xl border border-red-200 flex items-start gap-3">
+                    <AlertCircle className="h-5 w-5 shrink-0 mt-0.5" />
+                    <div>
+                        <p className="font-medium">Error</p>
+                        <p className="mt-0.5">{error}</p>
+                    </div>
+                </div>
+            )}
 
             {loading ? (
                 <div className="bg-white rounded-2xl border border-slate-200/60 shadow-sm p-12 text-center">
@@ -221,6 +305,12 @@ export default function ServicesPage() {
                                 <X className="h-5 w-5" />
                             </button>
                         </div>
+
+                        {error && (
+                            <div className="bg-red-50 text-red-700 text-sm p-3 rounded-lg border border-red-100 mb-4">
+                                {error}
+                            </div>
+                        )}
 
                         <form onSubmit={handleSave} className="space-y-4">
                             <div>
