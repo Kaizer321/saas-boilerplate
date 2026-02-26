@@ -20,7 +20,21 @@ export default function ServicesPage() {
     const [price, setPrice] = useState('');
     const [currency, setCurrency] = useState('USD');
 
+    const [orgId, setOrgId] = useState<string | null>(null);
+
     const supabase = createSupabaseBrowserClient();
+
+    const fetchOrgId = async () => {
+        const { data: { user } } = await supabase.auth.getUser();
+        if (user) {
+            const { data } = await supabase
+                .from('users')
+                .select('org_id')
+                .eq('id', user.id)
+                .single();
+            if (data) setOrgId(data.org_id);
+        }
+    };
 
     const fetchServices = async () => {
         const { data } = await supabase
@@ -32,6 +46,7 @@ export default function ServicesPage() {
     };
 
     useEffect(() => {
+        fetchOrgId();
         fetchServices();
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
@@ -72,7 +87,7 @@ export default function ServicesPage() {
         if (editing) {
             await supabase.from('services').update(payload).eq('id', editing.id);
         } else {
-            await supabase.from('services').insert(payload);
+            await supabase.from('services').insert({ ...payload, org_id: orgId });
         }
 
         setSaving(false);

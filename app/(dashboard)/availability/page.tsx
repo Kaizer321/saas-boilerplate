@@ -44,11 +44,24 @@ export default function AvailabilityPage() {
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
     const [saved, setSaved] = useState(false);
+    const [orgId, setOrgId] = useState<string | null>(null);
 
     const supabase = createSupabaseBrowserClient();
 
     useEffect(() => {
-        const fetch = async () => {
+        const init = async () => {
+            // Get org_id
+            const { data: { user } } = await supabase.auth.getUser();
+            if (user) {
+                const { data: profile } = await supabase
+                    .from('users')
+                    .select('org_id')
+                    .eq('id', user.id)
+                    .single();
+                if (profile) setOrgId(profile.org_id);
+            }
+
+            // Get existing availability
             const { data } = await supabase
                 .from('availability')
                 .select('*')
@@ -65,7 +78,7 @@ export default function AvailabilityPage() {
             }
             setLoading(false);
         };
-        fetch();
+        init();
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
@@ -90,7 +103,7 @@ export default function AvailabilityPage() {
             if (slot.id) {
                 await supabase.from('availability').update(payload).eq('id', slot.id);
             } else {
-                const { data } = await supabase.from('availability').insert(payload).select('id').single();
+                const { data } = await supabase.from('availability').insert({ ...payload, org_id: orgId }).select('id').single();
                 if (data) slot.id = data.id;
             }
         }
